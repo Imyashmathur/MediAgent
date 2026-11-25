@@ -1,0 +1,19 @@
+services:
+  holder:
+    image: mediagent-api:latest
+    environment: {PYTHONPATH: /app}
+    command: ["python", "/test/holder.py"]
+    volumes:
+      - staging:/data/uploads
+      - .:/test:ro
+  checker:
+    image: mediagent-api:latest
+    environment: {PYTHONPATH: /app}
+    command: ["sleep", "120"]
+    depends_on:
+      holder: {condition: service_started}
+    volumes:
+      - staging:/data/uploads
+      - .:/test:ro
+volumes:
+  staging:

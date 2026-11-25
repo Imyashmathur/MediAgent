@@ -1,0 +1,49 @@
+services:
+  db:
+    image: mediagent-db:latest
+    environment:
+      POSTGRES_USER: mediagent
+      POSTGRES_PASSWORD: synthetic
+      POSTGRES_DB: mediagent
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mediagent -d mediagent"]
+      interval: 1s
+      timeout: 2s
+      retries: 30
+  redis:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 1s
+      timeout: 2s
+      retries: 30
+  mock:
+    image: python:3.12-slim
+    volumes: ["./mock.py:/tmp/mock.py:ro"]
+    command: ["python", "/tmp/mock.py"]
+  api:
+    image: mediagent-api:latest
+    environment: &settings
+      DATABASE_URL: postgresql+asyncpg://mediagent:synthetic@db:5432/mediagent
+      CELERY_BROKER_URL: redis://redis:6379/0
+      JWT_SECRET: synthetic-test-only-secret
+      OLLAMA_BASE_URL: http://mock:11434
+      OLLAMA_CHAT_MODEL: synthetic-chat
+    depends_on:
+      db: {condition: service_healthy}
+      redis: {condition: service_healthy}
+      mock: {condition: service_started}
+  dispatcher:
+    image: mediagent-api:latest
+    environment: *settings
+    command: ["python", "-m", "app.outbox_dispatcher"]
+    depends_on:
+      api: {condition: service_started}
+  worker:
+    image: mediagent-api:latest
+    environment:
+      <<: *settings
+      C_FORCE_ROOT: "1"
+    command: ["celery", "-A", "app.processing:celery_app", "worker", "--loglevel=WARNING", "--concurrency=1"]
+    depends_on:
+      api: {condition: service_started}

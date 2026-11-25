@@ -1,0 +1,40 @@
+services:
+  db:
+    image: mediagent-db:latest
+    environment:
+      POSTGRES_USER: mediagent
+      POSTGRES_PASSWORD: synthetic
+      POSTGRES_DB: mediagent
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mediagent -d mediagent"]
+      interval: 1s
+      timeout: 2s
+      retries: 30
+  redis:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 1s
+      timeout: 2s
+      retries: 30
+  mailpit:
+    image: axllent/mailpit:v1.27
+  api:
+    image: mediagent-api:latest
+    environment: &settings
+      DATABASE_URL: postgresql+asyncpg://mediagent:synthetic@db:5432/mediagent
+      CELERY_BROKER_URL: redis://redis:6379/0
+      JWT_SECRET: synthetic-test-only-secret
+      EMAIL_VERIFICATION_ENABLED: "true"
+      RESET_MAIL_HOST: mailpit
+      APP_PUBLIC_URL: http://localhost:3100
+    depends_on:
+      db: {condition: service_healthy}
+      redis: {condition: service_healthy}
+      mailpit: {condition: service_started}
+  mailer:
+    image: mediagent-api:latest
+    environment: *settings
+    command: ["python", "-m", "app.reset_mailer"]
+    depends_on:
+      api: {condition: service_started}

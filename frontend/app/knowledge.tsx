@@ -1,0 +1,65 @@
+'use client';
+
+import {FormEvent, useCallback, useEffect, useState} from 'react';
+import {KnowledgeReviewAdmin} from './knowledge-reviews';
+
+type Source = {id:string; title:string; publisher:string; provenance:string; publication_date:string; specialty:string; version:string; status:string; index_status:string; embedding_digest:string|null; content?:string; created_by?:string; import_id?:string|null};
+type ImportJob = {id:string; filename:string; sha256:string; media_type:string; scan_status:'not_scanned'|'no_threat_detected'; status:string; error_code:string|null; deleted_at:number|null; purge_status:string; purged_at:number|null; extracted_text?:string|null};
+type Result = {excerpt:string; chunk:number; source:Source; distance:number};
+type Api = (path:string, init?:RequestInit)=>Promise<Response>;
+const json = (body:object):RequestInit => ({method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)});
+
+export default function Knowledge({admin, api, onError}:{admin:boolean; api:Api; onError:(message:string)=>void}) {
+  const [reviewPolicy,setReviewPolicy] = useState<{knowledge_review_policy:'independent'|'self_or_independent';clinical_review_policy?:'required'|'optional';administrator_id:string}|null>(null);
+  const [sources,setSources] = useState<Source[]>([]);
+  const [results,setResults] = useState<Result[] | null>(null);
+  const [busy,setBusy] = useState(false);
+  const [status,setStatus] = useState('');
+  const [indexJobs,setIndexJobs] = useState<Record<string,{status:string;error_code:string|null}[]>>({});
+  const [imports,setImports] = useState<ImportJob[]>([]);
+  const [content,setContent] = useState('');
+  const [importId,setImportId] = useState<string|null>(null);
+  const load = useCallback(async()=>{if(admin) {try {const response=await api('admin/knowledge'); setSources(await response.json());} catch(e) {onError((e as Error).message);}}},[admin,api,onError]);
+  const loadImports = useCallback(async()=>{if(admin) {try {const response=await api('admin/knowledge/imports'); setImports(await response.json());} catch(e) {onError((e as Error).message);}}},[admin,api,onError]);
+  useEffect(()=>{void load(); void loadImports();},[load,loadImports]);
+  useEffect(()=>{let current=true; setReviewPolicy(null); if(admin) void api('admin/knowledge/review-policy').then(r=>r.json()).then(data=>{if(current && (data.knowledge_review_policy==='independent' || data.knowledge_review_policy==='self_or_independent')) setReviewPolicy(data);}).catch(()=>{if(current) onError('Unable to load knowledge approval policy.');}); return ()=>{current=false;};},[admin,api,onError]);
+  async function create(event:FormEvent<HTMLFormElement>) {
+    event.preventDefault(); const form=event.currentTarget; const data=new FormData(form); setBusy(true); onError('');
+    const effective=String(data.get('effective_at')); const retire=String(data.get('retire_at')); const previous=String(data.get('previous_id'));
+    try {await api('admin/knowledge',json({title:data.get('title'),publisher:data.get('publisher'),provenance:data.get('provenance'),publication_date:data.get('publication_date'),specialty:data.get('specialty'),version:data.get('version'),content:data.get('content'),import_id:importId,effective_at:effective ? new Date(effective).getTime()/1000 : Date.now()/1000,retire_at:retire ? new Date(retire).getTime()/1000 : null,previous_id:previous || null})); form.reset(); setContent(''); setImportId(null); await load(); setStatus('Source saved as a draft.');} catch(e) {onError((e as Error).message);} finally {setBusy(false);}
+  }
+  async function uploadReference(event:FormEvent<HTMLFormElement>) {
+    event.preventDefault(); const form=event.currentTarget; setBusy(true); onError('');
+    try {await api('admin/knowledge/imports',{method:'POST',body:new FormData(form)}); form.reset(); await loadImports(); setStatus('Reference parsing queued. Refresh imports to check status.');} catch(e) {await loadImports(); onError((e as Error).message);} finally {setBusy(false);}
+  }
+  async function useImport(job:ImportJob) {
+    setBusy(true); onError('');
+    try {const result=await api(`admin/knowledge/imports/${job.id}`); const data:ImportJob=await result.json(); if(data.status!=='completed' || !data.extracted_text) throw new Error('Import is not complete.'); setContent(data.extracted_text); setImportId(data.id); setStatus('Imported text loaded. Check it against the original before creating a draft.');} catch(e) {onError((e as Error).message);} finally {setBusy(false);}
+  }
+  async function retryImport(job:ImportJob) {
+    setBusy(true);
+    try {await api(`admin/knowledge/imports/${job.id}/retry`,json({})); await loadImports(); setStatus('Reference parsing queued again. Refresh imports to check status.');} catch(e) {onError((e as Error).message);} finally {setBusy(false);}
+  }
+  async function deleteImport(event:FormEvent<HTMLFormElement>, job:ImportJob) {
+    event.preventDefault(); const form=event.currentTarget; const confirmation=String(new FormData(form).get('confirmation') ?? ''); setBusy(true); onError('');
+    try {await api(`admin/knowledge/imports/${job.id}/delete`,json({confirmation})); if(importId===job.id) {setImportId(null); setContent('');} await loadImports(); setStatus('Import deletion requested. Linked knowledge sources retain their own text.');} catch(e) {onError((e as Error).message);} finally {setBusy(false);}
+  }
+  async function action(source:Source, name:'index'|'approve'|'retire') {
+    setBusy(true); onError('');
+    try {await api(`admin/knowledge/${source.id}/${name === 'index' ? 'index-jobs' : name}`,{method:'POST'}); await load(); if(name === 'index') await loadIndexJobs(source.id); setStatus(name === 'index' ? 'Indexing queued. Refresh indexing status to check progress.' : `Source ${name === 'approve' ? 'approved' : 'retired'}.`);} catch(e) {onError((e as Error).message);} finally {setBusy(false);}
+  }
+  async function loadIndexJobs(sourceId:string) {
+    try {const response=await api(`admin/knowledge/${sourceId}/index-jobs`); const jobs=await response.json(); setIndexJobs(current=>({...current,[sourceId]:jobs})); await load();} catch(e) {onError((e as Error).message);}
+  }
+  async function search(event:FormEvent<HTMLFormElement>) {
+    event.preventDefault(); const data=new FormData(event.currentTarget); setBusy(true); onError('');
+    try {const response=await api('knowledge/search',json({query:data.get('query'),specialty:data.get('specialty') || null})); setResults((await response.json()).results);} catch(e) {setResults(null); onError((e as Error).message);} finally {setBusy(false);}
+  }
+  return <section className="card document-list"><h3>Medical knowledge</h3><p>Search approved references for general education. Do not enter patient-specific information in this search. References can be incomplete or outdated and do not provide clinical decisions.</p>
+    <form onSubmit={search}><label>General question or topic<input name="query" minLength={2} maxLength={1000} required/></label><label>Specialty filter (optional)<input name="specialty" maxLength={100}/></label><button disabled={busy}>Search approved sources</button></form>
+    {results && <div className="note">{results.length ? <><p>Similarity ordering does not establish relevance, reliability, or clinical applicability.</p>{results.map((r,i)=><article key={`${r.source.id}-${r.chunk}-${i}`} className="note"><strong>{r.source.title} · {r.source.version}</strong><p>{r.source.publisher} · {r.source.publication_date} · {r.source.specialty}</p><p className="note-content">{r.excerpt}</p><p>Provenance: {r.source.provenance}</p></article>)}</> : <p>No approved indexed sources matched. Absence of a result is not evidence that no relevant guidance exists.</p>}</div>}
+    {admin && <div className="note"><h4>Add reference source</h4><p>{reviewPolicy?.knowledge_review_policy === 'independent' ? 'A different administrator must approve each source.' : reviewPolicy ? 'Administrators may approve sources they created.' : 'Loading knowledge approval policy…'} {reviewPolicy?.clinical_review_policy === 'required' ? ' The latest assigned doctor must recommend the source before approval.' : ' Clinical review is optional under the current policy.'}</p><p>Use published reference material, never patient-uploaded records. Review provenance and content before approval. Indexing requires a configured embedding service.</p><form onSubmit={uploadReference}><label>Reference file (PDF or DOCX)<input name="file" type="file" accept=".pdf,.docx" required/></label><button disabled={busy}>Upload for parsing</button></form><p>Files are staged separately from patient documents. Parsing can omit content; verify against the original. Refresh to check status.</p><button className="secondary" disabled={busy} onClick={loadImports}>Refresh imports</button>{imports.map(job=><div className="row" key={job.id}><div><strong>{job.filename}</strong><p>{job.status} · {job.scan_status === 'not_scanned' ? 'Not malware-scanned' : 'No threat detected by scanner'}{job.error_code && ` · ${job.error_code}`} · SHA-256 {job.sha256}</p>{job.deleted_at ? <p>Deletion requested · file purge: {job.purge_status}</p> : <a href={`/api/admin/knowledge/imports/${job.id}/download`}>Download original</a>}</div>{!job.deleted_at && job.status==='failed' && <button className="secondary" disabled={busy} onClick={()=>retryImport(job)}>Retry parsing</button>}{!job.deleted_at && job.status==='completed' && <button className="secondary" disabled={busy} onClick={()=>useImport(job)}>Use parsed text</button>}{!job.deleted_at && <form onSubmit={event=>deleteImport(event,job)}><label>Type DELETE to remove staged file and extracted text<input name="confirmation" required pattern="DELETE"/></label><button className="secondary" disabled={busy}>Delete staged import</button></form>}</div>)}<p>Deleting a staged import does not delete text already copied into a knowledge source or backups.</p><form onSubmit={create}><label>Title<input name="title" required maxLength={300}/></label><label>Publisher or author<input name="publisher" required maxLength={200}/></label><label>Source URL or provenance<input name="provenance" required maxLength={1000}/></label><label>Publication date<input type="date" name="publication_date" required/></label><label>Specialty<input name="specialty" required maxLength={100}/></label><label>Version<input name="version" required maxLength={80}/></label><label>Previous version ID (optional)<input name="previous_id"/></label><label>Effective from (defaults to now)<input type="datetime-local" name="effective_at"/></label><label>Retirement date (optional)<input type="datetime-local" name="retire_at"/></label><label>Reference text<textarea name="content" rows={8} required maxLength={50000} value={content} onChange={event=>{setContent(event.target.value); if(importId) {setImportId(null); setStatus('Text edited; this draft will be treated as manually entered.');}}}/></label>{importId && <p>Linked to import {importId}. Editing text removes that link.</p>}<button disabled={busy}>Create draft source</button></form>
+      {status && <p role="status">{status}</p>}{sources.map(source=><article className="note" key={source.id}><strong>{source.title} · {source.version}</strong><p>{source.status} · {source.index_status} · {source.specialty}</p>{source.index_status === 'ready' && !source.embedding_digest && <p>Reindex to record the model digest before this source can be searched or approved.</p>}<p>Source ID: <code>{source.id}</code></p><p>{source.publisher} · {source.publication_date} · {source.provenance}</p>{source.import_id && <p>{imports.find(job=>job.id===source.import_id)?.deleted_at ? 'Staged original deleted; source text remains.' : <a href={`/api/admin/knowledge/imports/${source.import_id}/download`}>Download imported original</a>}</p>}<details><summary>Review source text</summary><p className="note-content">{source.content}</p></details>{source.status === 'draft' && <KnowledgeReviewAdmin api={api} sourceId={source.id} onError={onError}/>}{source.status !== 'retired' && <button className="secondary" disabled={busy} onClick={()=>action(source,'index')}>{source.index_status === 'ready' ? 'Reindex' : 'Index'}</button>}{' '}<button className="secondary" disabled={busy} onClick={()=>void loadIndexJobs(source.id)}>Refresh indexing status</button>{indexJobs[source.id]?.[0] && <p>Latest indexing job: {indexJobs[source.id][0].status}{indexJobs[source.id][0].error_code && ` · ${indexJobs[source.id][0].error_code}`}</p>}{' '}{source.status === 'draft' && <button disabled={busy || !reviewPolicy || source.index_status !== 'ready' || !source.embedding_digest || (reviewPolicy.knowledge_review_policy === 'independent' && source.created_by === reviewPolicy.administrator_id)} onClick={()=>action(source,'approve')}>Approve source</button>}{' '}{source.status !== 'retired' && <button className="secondary" disabled={busy} onClick={()=>action(source,'retire')}>Retire source</button>}</article>)}
+    </div>}
+  </section>;
+}

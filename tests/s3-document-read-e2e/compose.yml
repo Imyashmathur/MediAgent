@@ -1,0 +1,66 @@
+services:
+  db:
+    image: mediagent-db:latest
+    environment:
+      POSTGRES_USER: mediagent
+      POSTGRES_PASSWORD: synthetic
+      POSTGRES_DB: mediagent
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mediagent -d mediagent"]
+      interval: 1s
+      timeout: 2s
+      retries: 30
+  redis:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 1s
+      timeout: 2s
+      retries: 30
+  object-store:
+    image: minio/minio@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e
+    environment:
+      MINIO_ROOT_USER: synthetic-user
+      MINIO_ROOT_PASSWORD: synthetic-password
+    command: ["server", "/data"]
+  api:
+    image: mediagent-api:latest
+    environment: &settings
+      APP_ENV: development
+      DATABASE_URL: postgresql+asyncpg://mediagent:synthetic@db:5432/mediagent
+      CELERY_BROKER_URL: redis://redis:6379/0
+      JWT_SECRET: synthetic-test-only-secret
+      DOCUMENT_STORAGE_BACKEND: s3
+      S3_ENDPOINT_URL: http://object-store:9000
+      S3_REGION: us-east-1
+      S3_BUCKET: synthetic-private-bucket
+      S3_INSECURE_TEST_ONLY: "true"
+      AWS_ACCESS_KEY_ID: synthetic-user
+      AWS_SECRET_ACCESS_KEY: synthetic-password
+      AWS_DEFAULT_REGION: us-east-1
+    depends_on:
+      db: {condition: service_healthy}
+      redis: {condition: service_healthy}
+      object-store: {condition: service_started}
+  dispatcher:
+    image: mediagent-api:latest
+    environment: *settings
+    command: ["python", "-m", "app.outbox_dispatcher"]
+    depends_on:
+      api: {condition: service_started}
+  worker:
+    image: mediagent-api:latest
+    environment:
+      <<: *settings
+      C_FORCE_ROOT: "1"
+    command: ["celery", "-A", "app.processing:celery_app", "worker", "--loglevel=WARNING", "--concurrency=1"]
+    stop_grace_period: 2s
+    depends_on:
+      api: {condition: service_started}
+  purger:
+    image: mediagent-api:latest
+    environment: *settings
+    command: ["python", "-m", "app.document_purger"]
+    stop_grace_period: 2s
+    depends_on:
+      api: {condition: service_started}

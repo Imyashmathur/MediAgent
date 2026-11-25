@@ -1,0 +1,114 @@
+services:
+  db:
+    build: ./docker/postgres
+    environment:
+      POSTGRES_USER: mediagent
+      POSTGRES_PASSWORD: mediagent
+      POSTGRES_DB: mediagent
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mediagent -d mediagent"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    volumes: [mediagent-db:/var/lib/postgresql/data]
+  redis:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+  mailpit:
+    image: axllent/mailpit:v1.27
+    ports: ["127.0.0.1:8125:8025"]
+  api:
+    build: ./backend
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://mediagent:mediagent@db:5432/mediagent
+      CELERY_BROKER_URL: redis://redis:6379/0
+      MAX_UPLOAD_BYTES: ${MAX_UPLOAD_BYTES:-10485760}
+      KNOWLEDGE_IMPORT_DIR: /data/knowledge-imports
+      EMAIL_VERIFICATION_ENABLED: ${EMAIL_VERIFICATION_ENABLED:-true}
+    depends_on:
+      db: {condition: service_healthy}
+      redis: {condition: service_healthy}
+    ports: ["127.0.0.1:8100:8000"]
+    volumes: [mediagent-uploads:/data/uploads, mediagent-knowledge:/data/knowledge-imports]
+  dispatcher:
+    build: ./backend
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://mediagent:mediagent@db:5432/mediagent
+      CELERY_BROKER_URL: redis://redis:6379/0
+    command: ["python", "-m", "app.outbox_dispatcher"]
+    depends_on:
+      db: {condition: service_healthy}
+      redis: {condition: service_healthy}
+      api: {condition: service_started}
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: ["ALL"]
+  document-purger:
+    build: ./backend
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://mediagent:mediagent@db:5432/mediagent
+      UPLOAD_DIR: /data/uploads
+      KNOWLEDGE_IMPORT_DIR: /data/knowledge-imports
+    command: ["python", "-m", "app.document_purger"]
+    depends_on:
+      db: {condition: service_healthy}
+      api: {condition: service_started}
+    volumes: [mediagent-uploads:/data/uploads, mediagent-knowledge:/data/knowledge-imports]
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: ["ALL"]
+  reset-mailer:
+    build: ./backend
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://mediagent:mediagent@db:5432/mediagent
+      RESET_MAIL_HOST: mailpit
+      APP_PUBLIC_URL: ${APP_PUBLIC_URL:-http://localhost:3100}
+    command: ["python", "-m", "app.reset_mailer"]
+    depends_on:
+      db: {condition: service_healthy}
+      api: {condition: service_started}
+      mailpit: {condition: service_started}
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: ["ALL"]
+  worker:
+    build: ./backend
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://mediagent:mediagent@db:5432/mediagent
+      CELERY_BROKER_URL: redis://redis:6379/0
+      MAX_UPLOAD_BYTES: ${MAX_UPLOAD_BYTES:-10485760}
+      TMPDIR: /tmp
+      KNOWLEDGE_IMPORT_DIR: /data/knowledge-imports
+      RESET_MAIL_HOST: mailpit
+      APP_PUBLIC_URL: ${APP_PUBLIC_URL:-http://localhost:3100}
+      C_FORCE_ROOT: "1"
+    command: ["celery", "-A", "app.processing:celery_app", "worker", "--loglevel=WARNING", "--concurrency=1"]
+    depends_on:
+      db: {condition: service_healthy}
+      redis: {condition: service_healthy}
+      api: {condition: service_started}
+      mailpit: {condition: service_started}
+    volumes: ["mediagent-uploads:/data/uploads:ro", "mediagent-knowledge:/data/knowledge-imports:ro"]
+    tmpfs: ["/tmp:rw,nosuid,nodev,noexec,size=134217728,mode=1777"]
+    mem_limit: 1g
+    cpus: 1.0
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: ["ALL"]
+  web:
+    build: ./frontend
+    environment:
+      API_INTERNAL_URL: http://api:8000
+      COOKIE_SECURE: "false"
+      MAX_UPLOAD_BYTES: ${MAX_UPLOAD_BYTES:-10485760}
+    depends_on: [api]
+    ports: ["127.0.0.1:3100:3000"]
+volumes:
+  mediagent-db:
+  mediagent-uploads:
+  mediagent-knowledge:
