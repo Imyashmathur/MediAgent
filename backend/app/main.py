@@ -1285,6 +1285,8 @@ async def save_document(file: UploadFile, user: User, db: AsyncSession, *, sessi
         else:
             document = Document(id=doc_id, patient_id=actor_id, filename=name, content_type=media_type, size=size, sha256=digest.hexdigest(), scan_status=scan_status)
             db.add(document)
+            await db.flush()
+            object_document_submissions.queue_document_processing(db, document, actor_id, observability.correlation_id.get())
             audit(db, actor_id, "document_upload", f"document:{doc_id}", "success", actor_id)
             await db.commit()
     except BaseException:
@@ -1666,7 +1668,8 @@ async def request_document_processing(document_id: str, request: Request, user: 
         audit(db, user.id, "document_processing_request", f"document:{document_id}", "denied", doc.patient_id if doc else None)
         await db.commit()
         raise HTTPException(403, "Only the document owner can request processing")
-    wants_vision = bool(data and data.vision_requested)
+    image_document = doc.content_type in ("image/jpeg", "image/png")
+    wants_vision = image_document or bool(data and data.vision_requested)
     fingerprint = None
     if wants_vision:
         if doc.content_type not in ("application/pdf", "image/jpeg", "image/png"):
@@ -1678,9 +1681,9 @@ async def request_document_processing(document_id: str, request: Request, user: 
         if settings.provider != "ollama":
             raise HTTPException(503, "Vision provider is not configured")
         fingerprint = vision_provider.config_fingerprint(settings)
-        if not data.vision_config_fingerprint or data.vision_config_fingerprint != fingerprint:
+        if not image_document and (not data.vision_config_fingerprint or data.vision_config_fingerprint != fingerprint):
             raise HTTPException(409, "Vision provider configuration changed; reload before requesting")
-    elif data and data.vision_config_fingerprint:
+    elif data and data.vision_config_fingerprint and not image_document:
         raise HTTPException(422, "Vision configuration requires a vision request")
     # A crashed worker can leave a claim behind; after five minutes a patient can retry.
     now = time.time()

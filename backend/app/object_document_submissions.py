@@ -11,9 +11,10 @@ from pathlib import Path
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
-from .models import AuditEvent, Document, DocumentObjectLink, ObjectDocumentSubmission, ObjectUploadDiscard, ObjectUploadIntent, Session, User
+from .models import AuditEvent, Document, DocumentObjectLink, ExtractionJob, JobOutbox, ObjectDocumentSubmission, ObjectUploadDiscard, ObjectUploadIntent, Session, User
 from .object_upload_intents import validate_store_id
 from .s3_storage import ObjectRef
+from . import vision_provider
 
 MEDIA_EXTENSIONS = {
     'application/pdf': {'.pdf'},
@@ -21,6 +22,33 @@ MEDIA_EXTENSIONS = {
     'image/png': {'.png'},
     'application/vnd.openxmlformats-officedocument.wordprocessingml.document': {'.docx'},
 }
+
+
+def queue_document_processing(db, document: Document, requested_by: str, correlation_id: str | None = None) -> ExtractionJob:
+    """Create the default extraction job in the same transaction as the upload."""
+    image_upload = document.content_type in ('image/jpeg', 'image/png')
+    vision_fingerprint = None
+    if image_upload:
+        settings = vision_provider.config()
+        if settings.provider != 'ollama':
+            raise ValueError('vision_provider_not_configured')
+        vision_fingerprint = vision_provider.config_fingerprint(settings)
+    job = ExtractionJob(
+        id=str(uuid.uuid4()),
+        document_id=document.id,
+        requested_by=requested_by,
+        request_correlation_id=correlation_id,
+        processor_version=(
+            'docx-text-v4'
+            if document.content_type == 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+            else 'native-ocr-v2'
+        ),
+        vision_requested=image_upload,
+        vision_config_fingerprint=vision_fingerprint,
+    )
+    db.add(job)
+    db.add(JobOutbox(kind='document_processing', target_id=job.id))
+    return job
 
 
 def validate_metadata(filename: str, content_type: str, scan_status: str) -> None:
@@ -92,6 +120,7 @@ async def complete_document(factory: async_sessionmaker, *, actor_id: str, inten
         db.add(document)
         await db.flush()
         db.add(DocumentObjectLink(document_id=document.id, intent_id=intent.id))
+        queue_document_processing(db, document, actor_id, submission.correlation_id)
         db.add(AuditEvent(actor_id=actor_id, patient_id=actor_id, action='object_document_upload_completed', resource=f'document:{document.id}', outcome='success', correlation_id=submission.correlation_id))
         await db.commit()
         return document.id
