@@ -9,7 +9,7 @@ import Knowledge from './knowledge';
 import {KnowledgeReviewDoctor} from './knowledge-reviews';
 import Assistant from './assistant';
 import Integrations from './integrations';
-import ProfileEditor, {DoctorProfileViewer, PatientProfileViewer} from './profile';
+import ProfileEditor, {DoctorProfileViewer} from './profile';
 import Consultations from './consultations';
 import CareMessages from './care-messages';
 import Operations from './operations';
@@ -264,7 +264,7 @@ export default function Home() {
       {user.role === 'admin' && <DoctorProfileViewer api={api} onError={setError}/>}
       {user.role === 'admin' && <AdminUsers api={api} onError={setError}/>}
       {user.role === 'admin' && <Operations api={api} onError={setError}/>}
-      <EmailVerification verified={user.email_verified_at != null} api={api} onRefresh={async()=>{try {const response=await api('me'); setUser(await response.json());} catch(e) {setError((e as Error).message);}}} onError={setError}/> {user.role !== 'admin' && <ProfileEditor api={api} userId={user.id} role={user.role} onError={setError} onVerificationChange={status=>setUser(current=>current ? {...current, verification_status:status} : null)}/>} {user.role === 'doctor' && <PatientProfileViewer key={patientId} api={api} patientId={patientId} onError={setError}/>}
+      <EmailVerification verified={user.email_verified_at != null} api={api} onRefresh={async()=>{try {const response=await api('me'); setUser(await response.json());} catch(e) {setError((e as Error).message);}}} onError={setError}/> {user.role !== 'admin' && <ProfileEditor api={api} userId={user.id} role={user.role} onError={setError} onVerificationChange={status=>setUser(current=>current ? {...current, verification_status:status} : null)}/>} 
       {user.role !== 'admin' && <Consultations key={user.role === 'patient' ? user.id : patientId} api={api} patientId={user.role === 'patient' ? user.id : patientId} isDoctor={user.role === 'doctor'} onError={setError}/>}
       {user.role !== 'admin' && <CareMessages api={api} relationships={relationships} userId={user.id} onError={setError}/>}
       {user.role !== 'admin' && <Notifications api={api} role={user.role} onError={setError} onOpenProcessing={(documentId,jobId)=>void viewProcessing(documentId,jobId)}/>}
