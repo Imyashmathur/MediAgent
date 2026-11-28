@@ -41,20 +41,64 @@ By default uploads are not malware-scanned, and signature checks do not establis
 
 ## Run locally
 
-Requirements: Docker with Compose. From this directory:
+Requirements: Git and Docker with Compose. Clone the repository and start the local stack:
 
 ```bash
+git clone https://github.com/Imyashmathur/MediAgent.git
+cd MediAgent
 cp .env.example .env
+# Set a unique JWT_SECRET in .env before starting the stack.
 docker compose up --build
 ```
 
-Open http://localhost:3100; API documentation is at http://localhost:8100/docs. Compose starts the migration before the API. Create a local administrator in a second terminal:
+For a local secret, generate a random value with `openssl rand -hex 32` and set `JWT_SECRET` in `.env`. Never commit `.env`.
+
+Open http://localhost:3100; API documentation is at http://localhost:8100/docs. The core workspace runs without an AI model; assistant responses, AI document summaries, and knowledge indexing require additional configuration. Compose starts the migration before the API. Create a local administrator in a second terminal:
 
 ```bash
 docker compose exec api python -m app.create_admin
 ```
 
 Follow the interactive prompts, then sign in as that administrator and verify a registered doctor by ID. The doctor can share their displayed ID with a patient, who can create a relationship and grant access. A doctor can then open that patient's document list using the patient's ID. Local Compose uses HTTP and intentionally disables the cookie `Secure` flag; never expose this configuration to the internet.
+
+### Configure local AI features
+
+Ollama and models are optional for the core workspace. To try the assistant,
+AI summaries, and knowledge indexing on Docker Desktop:
+
+1. Install and start [Ollama](https://ollama.com/). Pull a chat model and the
+   default embedding model on the host:
+
+   ```bash
+   ollama pull qwen3:4b-instruct
+   ollama pull all-minilm
+   ```
+
+2. In `.env`, set the following values. `host.docker.internal` is the Docker
+   Desktop address for an Ollama service running on the host; other Docker
+   environments need a host address that containers can reach.
+
+   ```dotenv
+   OLLAMA_BASE_URL=http://host.docker.internal:11434
+   OLLAMA_CHAT_MODEL=qwen3:4b-instruct
+   OLLAMA_EMBED_MODEL=all-minilm
+   ```
+
+3. Recreate the services so they read the updated configuration:
+
+   ```bash
+   docker compose up -d --build
+   ```
+
+The embedding model must return 384-dimensional vectors. To use retrieval,
+add reference material as an administrator, index it, and approve it; patient
+uploads are not automatically added to the reference collection. Chat and
+summaries send selected extracted text to the configured Ollama service.
+
+JPEG and PNG uploads automatically request vision transcription and require a
+configured vision-capable model; see [vision setup](docs/VISION_DESIGN.md).
+PDF vision transcription is optional. Model output, OCR, and comparisons are
+unverified; use synthetic data and check the original with a clinician.
 
 To create a complete opt-in synthetic workspace, start the stack and run:
 

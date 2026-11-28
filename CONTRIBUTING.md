@@ -7,13 +7,26 @@ health information, credentials, or copies of actual medical reports.
 
 ## Getting started
 
-1. Fork the repository and create a branch for your change.
+1. Fork [MediAgent on GitHub](https://github.com/Imyashmathur/MediAgent),
+   then clone your fork using the URL shown on its GitHub page.
 2. Follow [Run locally](README.md#run-locally) to start the Docker Compose
    stack. Do not expose the local development configuration to the internet.
 3. For substantial changes, describe the problem in an issue before investing
    in an implementation so maintainers and contributors can discuss scope.
-4. Make a focused change, add or update meaningful tests where appropriate, and
-   explain any remaining limitations in your pull request.
+4. Create a branch, make a focused change, and run relevant checks:
+
+   ```sh
+   git switch -c feature/my-change
+   # Make and test your changes.
+   git add <changed-files>
+   git commit -m "Describe the change"
+   git push -u origin feature/my-change
+   ```
+
+   Replace `<changed-files>` with the files you intend to contribute and review
+   the staged changes before committing. `origin` should point to your fork.
+5. Open a pull request from your fork's branch to `Imyashmathur/MediAgent`.
+   Explain the problem, what changed, checks run, and remaining limitations.
 
 ## Checks
 
