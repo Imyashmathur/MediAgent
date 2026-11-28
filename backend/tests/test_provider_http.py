@@ -68,3 +68,18 @@ async def test_chat_stream_success(monkeypatch):
         return httpx.Response(200, stream=Chunks([json.dumps({"message": {"content": "ok"}}).encode()]))
     monkeypatch.setattr(httpx, "AsyncClient", lambda **kwargs: real_client(transport=httpx.MockTransport(handler), **kwargs))
     assert await assistant_provider._chat([], {}) == "ok"
+
+@pytest.mark.asyncio
+async def test_summary_chat_requests_disable_context_truncation(monkeypatch):
+    monkeypatch.setenv("OLLAMA_BASE_URL", "http://provider.test")
+    monkeypatch.setenv("OLLAMA_CHAT_MODEL", "synthetic")
+    observed = []
+    real_client = httpx.AsyncClient
+    def handler(request):
+        observed.append(json.loads(request.content))
+        return httpx.Response(200, stream=Chunks([json.dumps({"message": {"content": "ok"}}).encode()]))
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kwargs: real_client(transport=httpx.MockTransport(handler), **kwargs))
+    schema = {"properties": {"citations": {"items": {"enum": ["S1"]}}}}
+    assert await assistant_provider._chat([], schema) == "ok"
+    assert observed[0]["truncate"] is False and observed[0]["shift"] is False
+    assert observed[0]["options"]["num_ctx"] == 16384

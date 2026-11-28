@@ -891,8 +891,8 @@ async def test_docx_upload_processing_and_segment_evidence(client, monkeypatch, 
     doc_id = upload.json()["id"]
     assert (await http.get(f"/documents/{doc_id}/preview/1",headers=ph)).status_code == 415
     path = f"/documents/{doc_id}/processing"
-    submitted = await http.post(path, headers=ph)
-    assert submitted.status_code == 202
+    submitted = await http.get(path, headers=ph)
+    assert submitted.status_code == 200
     await processing.process_job(submitted.json()["job_id"])
     result = (await http.get(path, headers=ph)).json()
     assert result["status"] == "completed" and result["processor_version"] == "docx-text-v4" and result["pages"][0]["method"] == "docx"
@@ -1254,15 +1254,16 @@ async def test_extraction_review_requires_explicit_consent_and_preserves_version
         await db.commit()
     with pymupdf.open() as pdf:
         page = pdf.new_page()
-        page.insert_text((72, 72), "Test name: Synthetic glucose\nObserved value: 6.2\nUnit: mmol/L\nMedicine name: Synthetic medicine\nDosage: 10 mg")
+        page.insert_text((72, 72), "Test name: Synthetic glucose\nObserved value: 6.2\nUnit: mmol/L\nReference range: 3.0 - 7.0\nMedicine name: Synthetic medicine\nDosage: 10 mg")
         content = pdf.tobytes()
     document = (await http.post("/documents", files={"file": ("report.pdf", content, "application/pdf")}, headers=patient_auth)).json()
     path = f"/documents/{document['id']}/processing"
-    job = (await http.post(path, headers=patient_auth)).json()
+    job = (await http.get(path, headers=patient_auth)).json()
     await processing.process_job(job["job_id"])
     result = (await http.get(path, headers=patient_auth)).json()
     extraction = result["structured_versions"][0]
     assert extraction["review_status"] == "unverified"
+    assert extraction["range_comparisons"] == ["within"]
     assert extraction["data"]["laboratory_tests"][0]["observed_value"]["evidence"] == {"page": 1, "quote": "6.2", "location_type": "page", "layer": "primary"}
     overview_path = f"/patients/{patient['id']}/extracted-records"
     overview = (await http.get(overview_path, headers=patient_auth)).json()
@@ -1297,6 +1298,7 @@ async def test_extraction_review_requires_explicit_consent_and_preserves_version
         await db.commit()
     invalid = {"expected_version": 1, "data": {"laboratory_tests": [{"test_name": {"value": "invented", "origin": "source", "evidence": {"page": 1, "quote": "invented"}}}]}}
     assert (await http.post(review_path, json=invalid, headers=doctor_auth)).status_code == 422
+    request["data"]["laboratory_tests"][0]["observed_value"] = {"value": "8", "origin": "clinician", "evidence": None}
     request["data"]["laboratory_tests"][0]["unit"] = {"value": "mmol/L corrected", "origin": "clinician", "evidence": None}
     request["data"]["laboratory_tests"][0]["laboratory_details"] = {"value": "Synthetic branch", "origin": "clinician", "evidence": None}
     assert (await http.post(review_path, json=request, headers=doctor_auth)).status_code == 422
@@ -1312,6 +1314,7 @@ async def test_extraction_review_requires_explicit_consent_and_preserves_version
     assert (await http.post(review_path, json=request, headers=doctor_auth)).status_code == 409
     history = (await http.get(path, headers=patient_auth)).json()["structured_versions"]
     assert [item["review_status"] for item in history] == ["reviewed", "unverified"]
+    assert [item["range_comparisons"] for item in history] == [["above"], ["within"]]
     assert history[1]["data"]["laboratory_tests"][0]["unit"]["value"] == "mmol/L"
     overview = (await http.get(overview_path, headers=doctor_auth)).json()["documents"][0]
     assert overview["review_status"] == "reviewed" and overview["version"] == 2
@@ -1367,14 +1370,14 @@ async def test_document_processing_is_authorized_and_idempotent(client, monkeypa
     path = f"/documents/{document_id}/processing"
     assert (await http.post(path, headers=other_auth)).status_code == 403
     assert (await http.get(path, headers=other_auth)).status_code == 403
-    requested = await http.post(path, headers=patient_auth)
-    assert requested.status_code == 202, requested.text
+    requested = await http.get(path, headers=patient_auth)
+    assert requested.status_code == 200, requested.text
     assert (await http.post(path, headers=patient_auth)).status_code == 409
     await processing.process_job(requested.json()["job_id"])
     await processing.process_job(requested.json()["job_id"])
     async with sessions() as db:
-        events = (await db.scalars(select(AuditEvent).where(AuditEvent.correlation_id == requested.headers["x-request-id"]))).all()
-        assert {event.action for event in events} >= {"document_processing_request", "document_processing_complete"}
+        events = (await db.scalars(select(AuditEvent).where(AuditEvent.correlation_id == upload.headers["x-request-id"]))).all()
+        assert {event.action for event in events} >= {"document_upload", "document_processing_complete"}
         assert sum(event.action == "document_processing_complete" for event in events) == 1
     notifications = (await http.get("/notifications", headers=patient_auth)).json()
     completed = [item for item in notifications if item["kind"] == "processing_completed" and item["resource_id"] == document_id]
@@ -1415,8 +1418,8 @@ async def test_processing_handles_queue_failure_and_invalid_file(client, monkeyp
     headers = auth((await login(http, patient["email"]))["access_token"])
     upload = await http.post("/documents", files={"file": ("broken.pdf", b"%PDF-not-valid", "application/pdf")}, headers=headers)
     path = f"/documents/{upload.json()['id']}/processing"
-    response = await http.post(path, headers=headers)
-    assert response.status_code == 202
+    response = await http.get(path, headers=headers)
+    assert response.status_code == 200
     job_id = response.json()["job_id"]
     async def unavailable(kind, target_id):
         raise ConnectionError("broker unavailable")
@@ -1457,7 +1460,7 @@ async def test_stale_worker_is_fenced_and_job_recovers(client, monkeypatch, tmp_
     headers = auth((await login(http, patient["email"]))["access_token"])
     upload = await http.post("/documents", files={"file": ("test.pdf", b"%PDF-synthetic", "application/pdf")}, headers=headers)
     path = f"/documents/{upload.json()['id']}/processing"
-    job_id = (await http.post(path, headers=headers)).json()["job_id"]
+    job_id = (await http.get(path, headers=headers)).json()["job_id"]
     entered, release = threading.Event(), threading.Event()
 
     def parse(*args, **kwargs):
@@ -1500,7 +1503,7 @@ async def test_expired_claims_stop_after_three_attempts(client):
     patient = await register(http, "recovery-limit@example.test", "patient")
     headers = auth((await login(http, patient["email"]))["access_token"])
     upload = await http.post("/documents", files={"file": ("test.pdf", b"%PDF-synthetic", "application/pdf")}, headers=headers)
-    requested = await http.post(f"/documents/{upload.json()['id']}/processing", headers=headers)
+    requested = await http.get(f"/documents/{upload.json()['id']}/processing", headers=headers)
     job_id = requested.json()["job_id"]
     async with sessions() as db:
         admin = User(email="recovery-admin@example.test", full_name="Synthetic Admin", role="admin", password_hash=hash_password("long-enough-password"), verification_status="not_applicable")
@@ -1516,7 +1519,7 @@ async def test_expired_claims_stop_after_three_attempts(client):
     async with sessions() as db:
         for job in (await db.get(ExtractionJob, job_id), await db.get(KnowledgeImport, import_id)):
             assert job.status == "failed" and job.error_code == "worker_lost" and job.claim_token is None
-        failure = await db.scalar(select(AuditEvent).where(AuditEvent.correlation_id == requested.headers["x-request-id"], AuditEvent.action == "document_processing_failed"))
+        failure = await db.scalar(select(AuditEvent).where(AuditEvent.correlation_id == upload.headers["x-request-id"], AuditEvent.action == "document_processing_failed"))
         assert failure and failure.outcome == "failed"
     notifications = (await http.get("/notifications", headers=headers)).json()
     assert sum(item["kind"] == "processing_failed" for item in notifications) == 1
@@ -1528,7 +1531,7 @@ async def test_published_message_that_never_starts_is_redispatched(client):
     patient = await register(http, "lost-message@example.test", "patient")
     headers = auth((await login(http, patient["email"]))["access_token"])
     upload = await http.post("/documents", files={"file": ("test.pdf", b"%PDF-synthetic", "application/pdf")}, headers=headers)
-    job_id = (await http.post(f"/documents/{upload.json()['id']}/processing", headers=headers)).json()["job_id"]
+    job_id = (await http.get(f"/documents/{upload.json()['id']}/processing", headers=headers)).json()["job_id"]
     async with sessions() as db:
         entry = await db.scalar(select(JobOutbox).where(JobOutbox.target_id == job_id))
         entry.status, entry.published_at = "published", time.time() - 301
@@ -1854,7 +1857,7 @@ async def test_patient_document_deletion_revokes_access_and_retries_file_purge(c
     uploaded = await http.post("/documents", headers=ph, files={"file":("sensitive.pdf",content,"application/pdf")})
     document_id = uploaded.json()["id"]
     path = f"/documents/{document_id}"
-    started = await http.post(path+"/processing", headers=ph)
+    started = await http.get(path+"/processing", headers=ph)
     await processing.process_job(started.json()["job_id"])
     assert (await http.get(path+"/download", headers=dh)).content == content
     assert (await http.post(path+"/delete", headers=oh, json={"confirmation":"DELETE"})).status_code == 403
@@ -1903,7 +1906,7 @@ async def test_document_deletion_fences_inflight_extraction(client, monkeypatch,
     headers = auth((await login(http, patient["email"]))["access_token"])
     upload = await http.post("/documents", headers=headers, files={"file":("test.pdf",b"%PDF-synthetic","application/pdf")})
     doc_id = upload.json()["id"]
-    job = (await http.post(f"/documents/{doc_id}/processing",headers=headers)).json()["job_id"]
+    job = (await http.get(f"/documents/{doc_id}/processing",headers=headers)).json()["job_id"]
     entered, release = threading.Event(), threading.Event()
     def parse(*args, **kwargs):
         entered.set()
@@ -1981,14 +1984,16 @@ async def test_document_summaries_are_cited_scoped_idempotent_and_deleted(client
     async with sessions() as db:
         job = ExtractionJob(document_id=doc_id,requested_by=patient["id"],status="completed")
         db.add(job); await db.flush(); job_id=job.id
-        db.add_all([ExtractedPage(job_id=job_id,page_number=i,method="native",text=f"Synthetic page {i}", supplemental_ocr_text="Synthetic OCR layer" if i == 1 else None) for i in range(1,7)])
+        db.add_all([ExtractedPage(job_id=job_id,page_number=i,method="native",text=f"Synthetic page {i}", supplemental_ocr_text="Synthetic OCR layer" if i == 1 else None) for i in range(1,4)])
         await db.commit()
     calls=[]
     async def draft(question, history, sources, audience):
         calls.append(1)
-        assert len(sources)==5 and all(source["kind"]=="unverified_patient_document" for source in sources)
-        assert sources[1]["layer"] == "supplemental_ocr" and sources[1]["text"] == "Synthetic OCR layer"
-        return assistant_provider.Draft(answer="Synthetic unverified summary",citations=[sources[1]["id"]])
+        assert len(sources) <= 3 and all(source["kind"]=="unverified_patient_document" for source in sources)
+        source = sources[1] if len(calls) == 1 else sources[0]
+        if len(calls) == 1:
+            assert source["layer"] == "supplemental_ocr" and source["text"] == "Synthetic OCR layer"
+        return assistant_provider.Draft(answer="Synthetic unverified summary",citations=[source["id"]])
     monkeypatch.setattr(assistant_provider,"draft_answer",draft)
     path=f"/documents/{doc_id}/processing/{job_id}/summaries"
     request={"request_id":str(uuid.uuid4())}
@@ -1997,10 +2002,10 @@ async def test_document_summaries_are_cited_scoped_idempotent_and_deleted(client
     created=await http.post(path,headers=ph,json=request)
     assert created.status_code==201, created.text
     summary=created.json()
-    assert summary["review_status"]=="unverified" and summary["truncated"] and summary["model_name"]=="synthetic-model"
+    assert summary["review_status"]=="unverified" and not summary["truncated"] and summary["model_name"]=="synthetic-model"
     assert summary["citations"][0]["page"]==1 and summary["citations"][0]["layer"]=="supplemental_ocr" and "text" not in summary["citations"][0]
     replay=await http.post(path,headers=ph,json=request)
-    assert replay.status_code==200 and replay.json()["id"]==summary["id"] and len(calls)==1
+    assert replay.status_code==200 and replay.json()["id"]==summary["id"] and len(calls)==2
     assert (await http.get(path,headers=ph)).json()[0]["id"]==summary["id"]
     relationship=(await http.post("/relationships",headers=ph,json={"doctor_id":doctor["id"],"purpose":"care"})).json()
     grants={}
@@ -2109,7 +2114,7 @@ async def test_mixed_ocr_is_separate_from_structured_transcription(client, monke
     headers=auth((await login(http,patient["email"]))["access_token"])
     upload=await http.post("/documents",headers=headers,files={"file":("test.pdf",b"%PDF-synthetic","application/pdf")})
     doc_id=upload.json()["id"]
-    job=(await http.post(f"/documents/{doc_id}/processing",headers=headers)).json()["job_id"]
+    job=(await http.get(f"/documents/{doc_id}/processing",headers=headers)).json()["job_id"]
     output={"pages":[{"page_number":1,"method":"native","text":"Laboratory report\nTest name: Native test\nObserved value: 1", "supplemental_ocr_text":"Test name: OCR-only test\nObserved value: 2"}],"processor_details":{"pipeline":"native-ocr-v2","pdf_ocr_mode":"all","ocr":{"provider":"tesseract","version":"5.5.0","languages":["eng"]}}}
     monkeypatch.setattr(processing,"run_document_parser",lambda *args,**kwargs:SimpleNamespace(stdout=json.dumps(output).encode()))
     await processing.process_job(job)
@@ -2347,10 +2352,10 @@ async def test_processing_records_pipe_table_transcription_and_parser_version(cl
         content = pdf.tobytes()
     doc = (await http.post("/documents", headers=headers, files={"file":("synthetic.pdf", content, "application/pdf")})).json()
     path = f"/documents/{doc['id']}/processing"
-    job = (await http.post(path, headers=headers)).json()
+    job = (await http.get(path, headers=headers)).json()
     await processing.process_job(job["job_id"])
     response = (await http.get(path, headers=headers)).json()
-    assert response["status"] == "completed" and response["processor_details"]["structured_parser"] == "explicit-labels-pipe-tables-v6"
+    assert response["status"] == "completed" and response["processor_details"]["structured_parser"] == "explicit-labels-pipe-native-tables-v7"
     version = response["structured_versions"][0]
     assert version["review_status"] == "unverified"
     row = version["data"]["laboratory_tests"][0]
@@ -2372,7 +2377,7 @@ async def test_processing_warns_about_cross_page_orphaned_fields(client, monkeyp
     headers = auth((await login(http, patient["email"]))["access_token"])
     doc = (await http.post("/documents", headers=headers, files={"file":("synthetic.pdf",b"%PDF-synthetic","application/pdf")})).json()
     path=f"/documents/{doc['id']}/processing"
-    job = (await http.post(path, headers=headers)).json()["job_id"]
+    job = (await http.get(path, headers=headers)).json()["job_id"]
     output={"pages":[{"page_number":1,"method":"native","text":"Test name: Synthetic test\nObserved value: 1"},{"page_number":2,"method":"native","text":"Unit: mg/dL"}],"processor_details":{"pipeline":"native-ocr-v2","pdf_ocr_mode":"fallback","ocr":None}}
     monkeypatch.setattr(processing,"run_document_parser",lambda *args,**kwargs:SimpleNamespace(stdout=json.dumps(output).encode()))
     await processing.process_job(job)
@@ -2406,6 +2411,10 @@ async def test_vision_processing_requires_explicit_current_configuration_and_kee
     assert (await http.post(path,headers=oh,json=requested)).status_code == 403
     assert (await http.post(path,headers=ph,json={"vision_requested":True})).status_code == 409
     assert (await http.post(path,headers=ph,json={**requested,"vision_config_fingerprint":"0"*64})).status_code == 409
+    async with sessions() as db:
+        initial=await db.scalar(select(ExtractionJob).where(ExtractionJob.document_id==document["id"], ExtractionJob.status=="queued"))
+        initial.status="failed"
+        await db.commit()
     job=(await http.post(path,headers=ph,json=requested)).json()["job_id"]
     output={"pages":[{"page_number":1,"method":"native","text":"Test name: Native\nObserved value: 1","vision_text":"Test name: Vision guess\nObserved value: 2","vision_warnings":["uncertain"]}],"processor_details":{"pipeline":"native-ocr-v2","pdf_ocr_mode":"fallback","ocr":None,"vision":{"provider":"ollama","model":"synthetic-vision","pages_processed":1,"truncated":False}}}
     seen=[]
@@ -2470,6 +2479,8 @@ async def test_vision_subprocess_through_api_and_clinician_review(client, monkey
         upload=await http.post("/documents",headers=ph,files={"file":("synthetic.pdf",contents,"application/pdf")})
         assert upload.status_code==201, upload.text
         path=f"/documents/{upload.json()['id']}/processing"
+        initial=(await http.get(path,headers=ph)).json()["job_id"]
+        await processing.process_job(initial)
         config=(await http.get("/document-processing/capabilities",headers=ph)).json()
         queued=await http.post(path,headers=ph,json={"vision_requested":True,"vision_config_fingerprint":config["configuration"]})
         assert queued.status_code==202, queued.text
@@ -2536,8 +2547,9 @@ async def test_synthetic_seed_uses_authorized_workflows(client, monkeypatch, tmp
     class ImmediateWorker:
         async def post(self,path,**kwargs):
             response=await http.post(path,**kwargs)
-            if path.endswith("/processing") and response.status_code == 202:
-                await processing.process_job(response.json()["job_id"])
+            if path == "/documents" and response.status_code == 201:
+                result = await http.get(f"/documents/{response.json()['id']}/processing", headers=kwargs["headers"])
+                await processing.process_job(result.json()["job_id"])
             return response
         async def get(self,path,**kwargs): return await http.get(path,**kwargs)
     credentials=new_credentials()
@@ -2569,7 +2581,7 @@ async def test_new_document_hash_blocks_processing_of_same_size_changed_source(c
     async with sessions() as db:
         assert (await db.get(Document,doc["id"])).sha256 == hashlib.sha256(original).hexdigest()
     path=f"/documents/{doc['id']}/processing"
-    job=(await http.post(path,headers=headers)).json()["job_id"]
+    job=(await http.get(path,headers=headers)).json()["job_id"]
     (tmp_path / "uploads" / doc["id"]).write_bytes(b"%PDF-synthetic-B")
     calls=[]
     monkeypatch.setattr(processing,"run_document_parser",lambda *args,**kwargs:calls.append(1))
@@ -2592,7 +2604,7 @@ async def test_processing_parses_snapshot_and_rejects_changed_original(client,mo
     original=b"%PDF-synthetic-A"
     doc=(await http.post("/documents",headers=headers,files={"file":("synthetic.pdf",original,"application/pdf")})).json()
     path=f"/documents/{doc['id']}/processing"
-    job=(await http.post(path,headers=headers)).json()["job_id"]
+    job=(await http.get(path,headers=headers)).json()["job_id"]
     source=tmp_path / "uploads" / doc["id"]
     seen=[]
     def parse(args,**kwargs):
@@ -2843,7 +2855,7 @@ async def test_note_processing_source_is_patient_scoped_and_versioned(client, mo
     document = (await http.post('/documents', headers=ph, files={'file':('report.pdf',content,'application/pdf')})).json()
     other_doc = (await http.post('/documents', headers=oh, files={'file':('other.pdf',content,'application/pdf')})).json()
     path=f"/documents/{document['id']}/processing"
-    job = (await http.post(path,headers=ph)).json()['job_id']
+    job = (await http.get(path,headers=ph)).json()['job_id']
     notes=f"/patients/{patient['id']}/notes"
     payload={'content':'Synthetic note','source_document_id':document['id'],'source_processing_job_id':job,'source_extraction_version':1,'source_fields':[{'group':'laboratory_tests','index':0,'field':'observed_value'}]}
     assert (await http.post(notes,headers=dh,json=payload)).status_code == 404
@@ -3328,7 +3340,7 @@ async def test_object_document_download_preview_and_processing_obey_access(clien
     assert downloaded.status_code==200 and downloaded.content==content
     preview=await http.get(path+'/preview/1',headers=headers)
     assert preview.status_code==200 and preview.content.startswith(b'\x89PNG')
-    job=(await http.post(path+'/processing',headers=headers)).json()['job_id']
+    job=(await http.get(path+'/processing',headers=headers)).json()['job_id']
     await processing.process_job(job)
     result=(await http.get(path+'/processing',headers=headers)).json()
     assert result['status']=='completed' and 'Synthetic glucose' in result['pages'][0]['text']
@@ -3947,3 +3959,141 @@ async def test_admin_discard_error_listing_and_retry_are_bounded_and_private(cli
         marker.last_result, marker.error_code = 'absent', None
         await db.commit()
     assert (await http.post(retry, headers=ah)).status_code == 409
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("pages", [
+    [(1, "x" * 2001)],
+    [(number, ("x" * 1900 + "\n") * 4) for number in range(1, 31)],
+    [(1, "Synthetic first page"), (2, "  ")],
+    [(1, "Synthetic first page"), (3, "Synthetic third page")],
+])
+async def test_document_summary_refuses_incomplete_source_coverage(client, monkeypatch, pages):
+    from app import assistant_provider
+    from app.models import ExtractedPage, SummaryGeneration
+    http, sessions = client
+    monkeypatch.setenv("OLLAMA_CHAT_MODEL", "synthetic-model")
+    patient = await register(http, "summary-coverage@example.test", "patient")
+    headers = auth((await login(http, patient["email"]))["access_token"])
+    upload = await http.post("/documents", headers=headers, files={"file": ("report.pdf", b"%PDF-synthetic", "application/pdf")})
+    doc_id = upload.json()["id"]
+    async with sessions() as db:
+        job = ExtractionJob(document_id=doc_id, requested_by=patient["id"], status="completed")
+        db.add(job)
+        await db.flush()
+        job_id = job.id
+        db.add_all([ExtractedPage(job_id=job_id, page_number=number, method="native", text=text) for number, text in pages])
+        await db.commit()
+    async def unexpected(*args, **kwargs):
+        pytest.fail("The model must not be called with incomplete document coverage")
+    monkeypatch.setattr(assistant_provider, "draft_answer", unexpected)
+    response = await http.post(f"/documents/{doc_id}/processing/{job_id}/summaries", headers=headers, json={"request_id": str(uuid.uuid4())})
+    assert response.status_code == 422
+    assert "empty, missing, or exceeds processing limits" in response.json()["detail"]
+    async with sessions() as db:
+        assert not (await db.scalars(select(SummaryGeneration).where(SummaryGeneration.document_id == doc_id))).all()
+
+@pytest.mark.asyncio
+async def test_large_document_summary_processes_every_page_in_bounded_batches(client, monkeypatch):
+    from app import assistant_provider
+    from app.models import ExtractedPage
+    http, sessions = client
+    monkeypatch.setenv("OLLAMA_CHAT_MODEL", "synthetic-model")
+    patient = await register(http, "large-summary@example.test", "patient")
+    headers = auth((await login(http, patient["email"]))["access_token"])
+    upload = await http.post("/documents", headers=headers, files={"file": ("report.pdf", b"%PDF-synthetic", "application/pdf")})
+    doc_id = upload.json()["id"]
+    async with sessions() as db:
+        job = ExtractionJob(document_id=doc_id, requested_by=patient["id"], status="completed")
+        db.add(job)
+        await db.flush()
+        job_id = job.id
+        db.add_all([ExtractedPage(job_id=job_id, page_number=i, method="native", text=f"Synthetic page {i}\n") for i in range(1, 20)])
+        await db.commit()
+    seen = []
+    async def draft(question, history, sources, audience):
+        assert len(sources) <= 3
+        seen.extend(source["page"] for source in sources)
+        return assistant_provider.Draft(answer="Unverified synthetic page summary.", citations=[sources[0]["id"]])
+    monkeypatch.setattr(assistant_provider, "draft_answer", draft)
+    response = await http.post(f"/documents/{doc_id}/processing/{job_id}/summaries", headers=headers, json={"request_id":str(uuid.uuid4())})
+    assert response.status_code == 201, response.text
+    assert seen == list(range(1, 20))
+    assert "Part 7:" in response.json()["content"]
+    assert response.json()["truncated"] is False
+    assert {item["page"] for item in response.json()["citations"]} == {1, 4, 7, 10, 13, 16, 19}
+
+@pytest.mark.asyncio
+async def test_large_summary_stops_before_next_batch_after_account_deactivation(client, monkeypatch):
+    from app import assistant_provider
+    from app.models import DocumentSummary, ExtractedPage
+    http, sessions = client
+    monkeypatch.setenv("OLLAMA_CHAT_MODEL", "synthetic-model")
+    patient = await register(http, "large-summary-revoke@example.test", "patient")
+    headers = auth((await login(http, patient["email"]))["access_token"])
+    uploaded = await http.post("/documents", headers=headers, files={"file": ("report.pdf", b"%PDF-synthetic", "application/pdf")})
+    doc_id = uploaded.json()["id"]
+    async with sessions() as db:
+        job = ExtractionJob(document_id=doc_id, requested_by=patient["id"], status="completed")
+        db.add(job)
+        await db.flush()
+        job_id = job.id
+        db.add_all([ExtractedPage(job_id=job_id, page_number=i, method="native", text=f"Synthetic {i}") for i in range(1, 5)])
+        await db.commit()
+    calls = []
+    async def draft(question, history, sources, audience):
+        calls.append(1)
+        async with sessions() as db:
+            (await db.get(User, patient["id"])).active = False
+            await db.commit()
+        return assistant_provider.Draft(answer="Synthetic unverified output", citations=[sources[0]["id"]])
+    monkeypatch.setattr(assistant_provider, "draft_answer", draft)
+    response = await http.post(f"/documents/{doc_id}/processing/{job_id}/summaries", headers=headers, json={"request_id": str(uuid.uuid4())})
+    assert response.status_code in (401, 403)
+    assert len(calls) == 1
+    async with sessions() as db:
+        assert not (await db.scalars(select(DocumentSummary).where(DocumentSummary.document_id == doc_id))).all()
+
+@pytest.mark.asyncio
+async def test_native_pdf_table_comparisons_remain_unverified_and_source_linked(client, monkeypatch, tmp_path):
+    http, sessions = client
+    monkeypatch.setattr(processing, 'Session', sessions)
+    monkeypatch.setenv('UPLOAD_DIR', str(tmp_path / 'uploads'))
+    patient = await register(http, 'native-table-ranges@example.test', 'patient')
+    headers = auth((await login(http, patient['email']))['access_token'])
+    with pymupdf.open() as pdf:
+        page = pdf.new_page()
+        xs, ys = [40, 250, 340, 410, 550], [70, 95, 120, 145, 170]
+        for x in xs: page.draw_line((x, ys[0]), (x, ys[-1]))
+        for y in ys: page.draw_line((xs[0], y), (xs[-1], y))
+        rows = [['Test Description', 'Value(s)', 'Unit(s)', 'Reference Range'],
+                ['Synthetic A', '5.4', '%', '< 5.7'],
+                ['Synthetic B', '1.54 H*', 'ratio', '<1.00'],
+                ['Synthetic C', '< 148 L*', 'pg/mL', '187 - 883']]
+        for row, values in enumerate(rows):
+            for column, value in enumerate(values):
+                page.insert_text((xs[column] + 3, ys[row] + 16), value, fontsize=8)
+        # A separate four-column reference chart uses different column boundaries;
+        # its example values must not become patient results.
+        example_xs, example_ys = [55, 145, 240, 345, 500], [200, 225, 250]
+        for x in example_xs: page.draw_line((x, example_ys[0]), (x, example_ys[-1]))
+        for y in example_ys: page.draw_line((example_xs[0], y), (example_xs[-1], y))
+        for row, values in enumerate([['Chart', 'Value', 'Unit', 'Note'], ['Example', '6', '%', '126']]):
+            for column, value in enumerate(values):
+                page.insert_text((example_xs[column] + 3, example_ys[row] + 16), value, fontsize=8)
+        content = pdf.tobytes()
+    uploaded = await http.post('/documents', headers=headers, files={'file': ('table.pdf', content, 'application/pdf')})
+    assert uploaded.status_code == 201, uploaded.text
+    path = f"/documents/{uploaded.json()['id']}/processing"
+    job_id = (await http.get(path, headers=headers)).json()['job_id']
+    await processing.process_job(job_id)
+    result = (await http.get(path, headers=headers)).json()
+    assert result['status'] == 'completed', result
+    version = result['structured_versions'][0]
+    assert version['review_status'] == 'unverified'
+    assert version['range_comparisons'] == ['within', 'above', 'below']
+    labs = version['data']['laboratory_tests']
+    assert [row['test_name']['value'] for row in labs] == ['Synthetic A', 'Synthetic B', 'Synthetic C']
+    assert labs[1]['observed_value']['evidence']['quote'] == '1.54 H*'
+    assert labs[1]['abnormality_flag']['value'] == 'H*'
+    assert labs[2]['reference_range']['evidence']['page'] == 1
+    assert any('unverified' in warning and 'table' in warning for warning in version['data']['warnings'])

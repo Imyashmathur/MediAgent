@@ -2,6 +2,7 @@
 import io
 import json
 import math
+import re
 import sys
 import warnings
 import zipfile
@@ -170,6 +171,61 @@ def vision_png(image: Image.Image) -> bytes:
     return output.getvalue()
 
 
+def native_lab_table_rows(page, page_text: str, page_number: int) -> list[dict]:
+    """Conservatively transcribe four-column native PDF lab tables as unverified rows."""
+    if not all(label in page_text.casefold() for label in ("test description", "value(s)", "unit(s)", "reference range")):
+        return []
+    # PyMuPDF otherwise emits a recommendation on stdout, corrupting parser JSON.
+    pymupdf.no_recommend_layout()
+    tables = page.find_tables().tables
+    header = None
+    for table in tables:
+        if table.col_count != 4:
+            continue
+        for index, values in enumerate(table.extract()):
+            if [str(value or "").strip().casefold() for value in values] == ["test description", "value(s)", "unit(s)", "reference range"]:
+                cells = table.rows[index].cells
+                if len(cells) == 4 and all(cells):
+                    header = (cells, table.rows[index].bbox[3])
+                    break
+        if header:
+            break
+    if not header:
+        return []
+    header_cells, header_bottom = header
+    rows = []
+    for table in tables:
+        if table.col_count != 4 or table.bbox[3] <= header_bottom:
+            continue
+        for cells, values in zip(table.rows, table.extract()):
+            if cells.bbox[1] < header_bottom - 1 or len(cells.cells) != 4 or not all(cells.cells) or len(values) != 4:
+                continue
+            if any(abs(cell[0] - expected[0]) > 2 or abs(cell[2] - expected[2]) > 2 for cell, expected in zip(cells.cells, header_cells)):
+                continue
+            name = (values[0] or "").split("\n")[0].strip()
+            value = (values[1] or "").strip()
+            unit = (values[2] or "").strip()
+            reference = (values[3] or "").strip()
+            if (not name or len(name) > 100 or name.endswith(("-", "(")) or name not in page_text
+                or not re.fullmatch(r"\s*[<>≤≥]?\s*[+-]?(?:\d+(?:\.\d+)?|\.\d+)(?:\s+[HL]\*?)?\s*", value, re.I)
+                or value not in page_text):
+                continue
+            def field(text):
+                return {"value": text, "origin": "source", "evidence": {"page": page_number, "quote": text, "location_type": "page", "layer": "primary"}}
+            record = {"test_name": field(name), "observed_value": field(value)}
+            flagged = re.search(r"\s+([HL]\*?)\s*$", value, re.I)
+            if flagged and flagged.group(1) in page_text:
+                record["abnormality_flag"] = field(flagged.group(1))
+            for key, item in (("unit", unit), ("reference_range", reference)):
+                if item and len(item) <= 500 and item in page_text:
+                    record[key] = field(item)
+            rows.append(record)
+            # Retain one extra row so the worker can report truncation.
+            if len(rows) >= 101:
+                return rows
+    return rows
+
+
 def parse(path: Path, media_type: str, vision: vision_provider.VisionProvider | None = None) -> list[dict]:
     settings = ocr_provider.config()
     pages = []
@@ -198,6 +254,10 @@ def parse(path: Path, media_type: str, vision: vision_provider.VisionProvider | 
                     else:
                         text, method = recognized, "ocr"
                 result = {"page_number": number, "method": method, "text": text}
+                if method == "native":
+                    rows = native_lab_table_rows(page, text, number)
+                    if rows:
+                        result["native_table_labs"] = rows
                 if supplement is not None:
                     result["supplemental_ocr_text"] = supplement
                 if vision is not None and number <= 3:

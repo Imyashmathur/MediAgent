@@ -1,0 +1,5 @@
+# Install separately from the application environment.
+ragas==0.4.2
+openai>=1.0,<3
+# Ragas 0.4.2 imports modules removed in 0.4.x.
+langchain-community==0.3.31

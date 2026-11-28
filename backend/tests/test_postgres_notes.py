@@ -448,8 +448,10 @@ async def test_extraction_review_in_postgres():
         uploaded = await client.post("/documents", files={"file": ("synthetic.pdf", contents, "application/pdf")}, headers=patient["auth"])
         assert uploaded.status_code == 201, uploaded.text
         path = f"/documents/{uploaded.json()['id']}/processing"
-        started = await client.post(path, headers=patient["auth"])
-        assert started.status_code == 202, started.text
+        started = await client.get(path, headers=patient["auth"])
+        assert started.status_code == 200, started.text
+        from app import processing
+        await processing.process_job(started.json()["job_id"])
         for _ in range(60):
             state = (await client.get(path, headers=doctor["auth"])).json()
             if state["status"] in ("completed", "failed"):
@@ -734,8 +736,10 @@ async def test_vision_layer_persists_in_postgres(monkeypatch):
         document=(await client.post("/documents",headers=headers,files={"file":("synthetic.pdf",b"%PDF-synthetic","application/pdf")})).json()
         path=f"/documents/{document['id']}/processing"
         async with Session() as db:
-            job=ExtractionJob(document_id=document["id"],requested_by=patient_id,status="queued",vision_requested=True,vision_config_fingerprint=capability["configuration"])
-            db.add(job); await db.commit(); job_id=job.id
+            job=await db.scalar(select(ExtractionJob).where(ExtractionJob.document_id==document["id"], ExtractionJob.status=="queued"))
+            job.vision_requested=True
+            job.vision_config_fingerprint=capability["configuration"]
+            await db.commit(); job_id=job.id
         output={"pages":[{"page_number":1,"method":"native","text":"Test name: Synthetic test","vision_text":"Synthetic vision text","vision_warnings":["uncertain"]}],"processor_details":{"pipeline":"native-ocr-v2","pdf_ocr_mode":"fallback","ocr":None,"vision":{"provider":"ollama","model":"synthetic-vision","pages_processed":1,"truncated":False}}}
         monkeypatch.setattr(processing,"run_document_parser",lambda *args,**kwargs:SimpleNamespace(stdout=json.dumps(output).encode()))
         await processing.process_job(job_id)
@@ -885,6 +889,7 @@ async def test_concurrent_document_object_completion_is_idempotent(dispose_conne
     from sqlalchemy import delete
     from app import object_document_submissions as submissions, object_upload_intents as intents
     from app.models import AuditEvent, Document, DocumentObjectLink, ObjectDocumentSubmission, ObjectUploadIntent, Session as UserSession
+    from app.models import ExtractionJob, JobOutbox
     from app.s3_storage import ObjectRef
     actor_id, session_id, object_id = (str(uuid.uuid4()) for _ in range(3))
     digest=hashlib.sha256(b'synthetic').hexdigest()
@@ -906,6 +911,9 @@ async def test_concurrent_document_object_completion_is_idempotent(dispose_conne
         async with Session() as db:
             await db.execute(delete(AuditEvent).where(AuditEvent.actor_id==actor_id))
             await db.execute(delete(DocumentObjectLink).where(DocumentObjectLink.document_id==object_id))
+            jobs=select(ExtractionJob.id).where(ExtractionJob.document_id==object_id)
+            await db.execute(delete(JobOutbox).where(JobOutbox.target_id.in_(jobs)))
+            await db.execute(delete(ExtractionJob).where(ExtractionJob.document_id==object_id))
             await db.execute(delete(Document).where(Document.id==object_id))
             await db.execute(delete(ObjectDocumentSubmission).where(ObjectDocumentSubmission.intent_id==intent_id))
             await db.execute(delete(ObjectUploadIntent).where(ObjectUploadIntent.id==intent_id))
@@ -1064,6 +1072,7 @@ async def test_discard_and_completion_are_mutually_exclusive(dispose_connections
     from sqlalchemy import delete
     from app import object_document_submissions as submissions, object_upload_intents as intents
     from app.models import AuditEvent, Document, DocumentObjectLink, ObjectDocumentSubmission, ObjectUploadDiscard, ObjectUploadIntent, Session as UserSession
+    from app.models import ExtractionJob, JobOutbox
     from app.s3_storage import ObjectRef
 
     actor_id, session_id, object_id = (str(uuid.uuid4()) for _ in range(3))
@@ -1124,6 +1133,9 @@ async def test_discard_and_completion_are_mutually_exclusive(dispose_connections
         async with Session() as db:
             await db.execute(delete(AuditEvent).where(AuditEvent.actor_id == actor_id))
             await db.execute(delete(DocumentObjectLink).where(DocumentObjectLink.document_id == object_id))
+            jobs=select(ExtractionJob.id).where(ExtractionJob.document_id==object_id)
+            await db.execute(delete(JobOutbox).where(JobOutbox.target_id.in_(jobs)))
+            await db.execute(delete(ExtractionJob).where(ExtractionJob.document_id==object_id))
             await db.execute(delete(Document).where(Document.id == object_id))
             if intent_id:
                 await db.execute(delete(ObjectUploadDiscard).where(ObjectUploadDiscard.intent_id == intent_id))

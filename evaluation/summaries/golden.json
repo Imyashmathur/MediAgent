@@ -1,0 +1,48 @@
+{
+  "dataset_version": "synthetic-v2",
+  "cases": [
+    {
+      "id": "lab-values",
+      "sections": [
+        "Synthetic laboratory report. Hemoglobin: 12.4 g/dL. Platelet count: 240 x10^9/L. No reference ranges are included."
+      ],
+      "reference": "The report lists hemoglobin as 12.4 g/dL and platelet count as 240 x10^9/L. Reference ranges are not provided."
+    },
+    {
+      "id": "medication-record",
+      "sections": [
+        "Synthetic medication record. Listed medication: metformin 500 mg, one tablet by mouth twice daily. The record does not state when the medication was started."
+      ],
+      "reference": "The record lists metformin 500 mg, one tablet by mouth twice daily. It does not state a start date."
+    },
+    {
+      "id": "missing-units",
+      "sections": [
+        "Synthetic laboratory report. Glucose: 105. The report does not provide a unit, reference range, or fasting status."
+      ],
+      "reference": "The report lists glucose as 105. The unit, reference range, and fasting status are not provided."
+    },
+    {
+      "id": "two-sections",
+      "sections": [
+        "Synthetic consultation record. Recorded complaint: intermittent headache for three days.",
+        "Synthetic consultation record continued. Recorded temperature: 37.0 C. No diagnosis is documented."
+      ],
+      "reference": "The record describes an intermittent headache for three days and a recorded temperature of 37.0 C. No diagnosis is documented."
+    },
+    {
+      "id": "result-versus-example",
+      "sections": [
+        "Synthetic laboratory report. Patient HbA1c result: 5.4%. Reference chart example: an HbA1c of 6% corresponds to an estimated average glucose of 126 mg/dL. The chart is general information, not this patient’s result."
+      ],
+      "reference": "The report lists the patient HbA1c as 5.4%. The 6% value is a general chart example, not the patient result."
+    },
+    {
+      "id": "reported-flag",
+      "sections": [
+        "Synthetic laboratory report. Calculated AST/ALT ratio: 1.54 H*. Laboratory reference: less than 1.00. H* denotes high."
+      ],
+      "reference": "The report lists an AST/ALT ratio of 1.54 and flags it high relative to its stated reference of less than 1.00."
+    }
+  ]
+}

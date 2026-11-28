@@ -58,8 +58,8 @@ async def main():
         assert downloaded.status_code==200 and downloaded.content==content,downloaded.text
         preview=await http.get(path+'/preview/1',headers=headers)
         assert preview.status_code==200 and preview.content.startswith(b'\x89PNG'),preview.text
-        queued=await http.post(path+'/processing',headers=headers,json={})
-        assert queued.status_code==202,queued.text
+        queued=await http.get(path+'/processing',headers=headers)
+        assert queued.status_code==200 and queued.json()['status'] in ('queued','running','completed'),queued.text
         for _ in range(60):
             result=(await http.get(path+'/processing',headers=headers)).json()
             if result['status'] in ('completed','failed'): break

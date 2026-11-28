@@ -34,7 +34,7 @@ from .models import AssistantPreference, AssistantTurn, AuditEvent, CareMessage,
 from .notifications import queue_notification
 from .parser_subprocess import parser_environment
 from .extraction_schema import StructuredExtraction, validate_evidence
-from . import assistant_provider, auth_rate_limit, document_storage, object_document_submissions, object_staging, object_upload_intents, email_verification, file_integrity, integration_rate_limit, knowledge, malware_scan, observability, password_reset, vision_provider
+from . import reference_comparison, summary_chunks, assistant_provider, auth_rate_limit, document_storage, object_document_submissions, object_staging, object_upload_intents, email_verification, file_integrity, integration_rate_limit, knowledge, malware_scan, observability, password_reset, vision_provider
 
 malware_scan.validate_config()
 app = FastAPI(title="MediAgent API", version="0.2.0")
@@ -1719,7 +1719,7 @@ async def document_processing_results(document_id: str, response: Response, user
         return {"status": "not_requested", "review_status": "unverified", "pages": [], "document": {"id": doc.id, "filename": doc.filename, "content_type": doc.content_type, "review_status": doc.review_status, "scan_status": doc.scan_status}}
     pages = (await db.scalars(select(ExtractedPage).where(ExtractedPage.job_id == job.id).order_by(ExtractedPage.page_number))).all()
     versions = (await db.scalars(select(StructuredExtractionVersion).where(StructuredExtractionVersion.job_id == job.id).order_by(StructuredExtractionVersion.version.desc()))).all()
-    structured = [{"id": v.id, "version": v.version, "review_status": v.review_status, "reviewer_id": v.reviewer_id, "reviewed_at": v.reviewed_at, "data": v.data} for v in versions]
+    structured = [{"id": v.id, "version": v.version, "review_status": v.review_status, "reviewer_id": v.reviewer_id, "reviewed_at": v.reviewed_at, "data": v.data, "range_comparisons": reference_comparison.assessments(v.data)} for v in versions]
     result = {"document": {"id": doc.id, "filename": doc.filename, "content_type": doc.content_type, "review_status": doc.review_status, "scan_status": doc.scan_status}, "job_id": job.id, "is_latest": job.id == latest.id, "status": job.status, "review_status": "unverified", "processor_version": job.processor_version, "processor_details": job.processor_details, "created_at": job.created_at,
               "error_code": job.error_code, "vision_requested": job.vision_requested, "pages": [{"page_number": p.page_number, "method": p.method, "text": p.text, **({"supplemental_ocr_text": p.supplemental_ocr_text} if p.supplemental_ocr_text is not None else {}), **({"vision_text": p.vision_text, "vision_warnings": p.vision_warnings} if p.vision_text is not None else {})} for p in pages], "structured_versions": structured}
     await db.commit()
@@ -1814,12 +1814,11 @@ async def generate_document_summary(document_id: str, job_id: str, data: Summary
     if not job or job.id != job_id or job.status != "completed":
         raise HTTPException(409, "Summary requires the latest completed processing job")
     pages = (await db.scalars(select(ExtractedPage).where(ExtractedPage.job_id == job_id).order_by(ExtractedPage.page_number))).all()
-    sections = [(page, layer, content) for page in pages for layer, content in (("primary", page.text), ("supplemental_ocr", page.supplemental_ocr_text or "")) if content.strip()]
-    if not sections:
-        raise HTTPException(422, "No extracted text is available to summarize")
-    selected = sections[:5]
-    truncated = len(sections) > 5 or any(len(content) > 2000 for _, _, content in selected)
-    sources = [{"id": f"document:{doc.id}:{'text_segment' if page.method == 'docx' else 'page'}:{page.page_number}:{layer}", "kind": "unverified_patient_document", "title": doc.filename, "text_segment" if page.method == "docx" else "page": page.page_number, "method": "ocr" if layer == "supplemental_ocr" else page.method, "layer": layer, "text": content[:2000]} for page, layer, content in selected]
+    try:
+        sources = summary_chunks.build_sources(doc.id, doc.filename, pages)
+    except summary_chunks.SummaryCoverageError:
+        raise HTTPException(422, "Document summary unavailable: extracted text is empty, missing, or exceeds processing limits. Review the original document with a clinician.")
+    truncated = False
     model_name = os.getenv("OLLAMA_CHAT_MODEL", "").strip()
     actor_id, request_id, claim = user.id, str(data.request_id), str(uuid.uuid4())
     audience = "doctor" if user.role == "doctor" else "patient"
@@ -1843,7 +1842,7 @@ async def generate_document_summary(document_id: str, job_id: str, data: Summary
             response.status_code = 200
             response.headers["Cache-Control"] = "no-store"
             return result
-        claimed = await db.execute(update(SummaryGeneration).where(SummaryGeneration.actor_id == actor_id, SummaryGeneration.request_id == request_id, or_(SummaryGeneration.status == "failed", (SummaryGeneration.status == "running") & (SummaryGeneration.started_at < time.time() - 180))).values(status="running", claim_token=claim, started_at=time.time()).returning(SummaryGeneration.actor_id))
+        claimed = await db.execute(update(SummaryGeneration).where(SummaryGeneration.actor_id == actor_id, SummaryGeneration.request_id == request_id, or_(SummaryGeneration.status == "failed", (SummaryGeneration.status == "running") & (SummaryGeneration.started_at < time.time() - 660))).values(status="running", claim_token=claim, started_at=time.time()).returning(SummaryGeneration.actor_id))
         if claimed.scalar_one_or_none() is None:
             await db.rollback()
             raise HTTPException(409, "Summary generation is already in progress")
@@ -1851,13 +1850,44 @@ async def generate_document_summary(document_id: str, job_id: str, data: Summary
     try:
         if not model_name or len(model_name) > 200:
             raise HTTPException(503, "Summary provider is not configured")
+        async def generate_batches():
+            answers, cited = [], set()
+            for index, batch in enumerate(summary_chunks.batches(sources), 1):
+                try:
+                    current_token = jwt.decode(credentials.credentials, SECRET, algorithms=["HS256"], options={"require": ["sub", "sid", "exp", "iat"]})
+                except jwt.InvalidTokenError:
+                    raise HTTPException(401, "Session expired during summary generation")
+                db.expire_all()
+                current_user = await active_identity(db, current_token["sub"], current_token["sid"])
+                await authorize_patient(db, current_user, patient_id, "read_documents", "document_summary_context")
+                await authorize_patient(db, current_user, patient_id, "assistant", "document_summary_context")
+                current_doc = await db.get(Document, document_id)
+                latest_job = await db.scalar(select(ExtractionJob).where(ExtractionJob.document_id == document_id).order_by(ExtractionJob.created_at.desc(), ExtractionJob.id.desc()).limit(1))
+                if not current_doc or current_doc.deleted_at is not None or current_doc.patient_id != patient_id:
+                    raise HTTPException(404, "Document no longer available")
+                if not latest_job or latest_job.id != job_id or latest_job.status != "completed":
+                    raise HTTPException(409, "Document processing changed during generation")
+                await db.rollback()
+                draft = await assistant_provider.draft_answer(assistant_provider.SUMMARY_QUESTION, [], batch, audience)
+                allowed = {source["id"] for source in batch}
+                if not draft.answer.strip() or not draft.citations or any(item not in allowed for item in draft.citations):
+                    raise assistant_provider.AssistantUnavailable("Assistant output could not be safely validated", reason="citations")
+                answers.append(f"Part {index}:\n{draft.answer}")
+                cited.update(draft.citations)
+                if sum(len(answer) for answer in answers) > 40_000:
+                    raise HTTPException(422, "Document summary exceeds the output limit; review the original document")
+            return "\n\n".join(answers), cited
+
         try:
-            draft = await asyncio.wait_for(assistant_provider.draft_answer("Summarize only the provided unverified document text. State uncertainty and missing information. Do not infer a diagnosis, reference range, or treatment decision.", [], sources, audience), timeout=120)
-        except (assistant_provider.AssistantUnavailable, asyncio.TimeoutError):
-            raise HTTPException(503, "Document summary unavailable")
-        valid_ids = {source["id"] for source in sources}
-        if not draft.answer.strip() or not draft.citations or any(item not in valid_ids for item in draft.citations):
-            raise HTTPException(503, "Document summary unavailable")
+            summary_content, cited_ids = await asyncio.wait_for(generate_batches(), timeout=600)
+        except asyncio.TimeoutError:
+            raise HTTPException(503, "Document summary timed out; try again or check the model service")
+        except assistant_provider.AssistantUnavailable as exc:
+            if str(exc) == "Assistant output could not be safely validated":
+                reasons = {"citations": "the model did not provide valid source citations", "output_filter": "the output matched a safety filter", "safety_check": "the model safety check declined the output", "invalid_format": "the model returned an invalid response"}
+                explanation = reasons.get(exc.reason, "the output could not be validated")
+                raise HTTPException(503, f"Document summary unavailable: {explanation}; try again or review the original document")
+            raise HTTPException(503, "Document summary model is unavailable; check the configured model service")
         try:
             token = jwt.decode(credentials.credentials, SECRET, algorithms=["HS256"], options={"require": ["sub", "sid", "exp", "iat"]})
         except jwt.InvalidTokenError:
@@ -1872,8 +1902,8 @@ async def generate_document_summary(document_id: str, job_id: str, data: Summary
         latest = await db.scalar(select(ExtractionJob).where(ExtractionJob.document_id == document_id).order_by(ExtractionJob.created_at.desc(), ExtractionJob.id.desc()).limit(1))
         if not latest or latest.id != job_id or latest.status != "completed":
             raise HTTPException(409, "Document processing changed during generation")
-        citations = [{k: v for k, v in source.items() if k != "text"} for source in sources if source["id"] in draft.citations]
-        summary = DocumentSummary(document_id=document_id, job_id=job_id, created_by=actor_id, content=draft.answer, citations=citations, truncated=truncated, model_name=model_name)
+        citations = [{k: v for k, v in source.items() if k != "text"} for source in sources if source["id"] in cited_ids]
+        summary = DocumentSummary(document_id=document_id, job_id=job_id, created_by=actor_id, content=summary_content, citations=citations, truncated=truncated, model_name=model_name)
         db.add(summary)
         await db.flush()
         result = await db.execute(update(SummaryGeneration).where(SummaryGeneration.actor_id == actor_id, SummaryGeneration.request_id == request_id, SummaryGeneration.status == "running", SummaryGeneration.claim_token == claim).values(status="completed", claim_token=None, summary_id=summary.id).returning(SummaryGeneration.actor_id))

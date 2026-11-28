@@ -16,7 +16,7 @@ from sqlalchemy import select, update
 from .db import Session, engine
 from .models import AuditEvent, Document, ExtractedPage, ExtractionJob, KnowledgeImport, StructuredExtractionVersion, User
 from .notifications import queue_notification
-from .extraction_schema import PARSER_VERSION, bounded_warnings, extract_labeled_fields, validate_evidence
+from .extraction_schema import LabTest, PARSER_VERSION, bounded_warnings, extract_labeled_fields, validate_evidence
 from .document_classification import classify_document
 from .parser_subprocess import run_document_parser
 from . import document_storage, ocr_provider, vision_provider
@@ -37,9 +37,12 @@ class PageResult(BaseModel):
     supplemental_ocr_text: str | None = Field(default=None, max_length=30_000)
     vision_text: str | None = Field(default=None, max_length=30_000)
     vision_warnings: list[Annotated[str, Field(max_length=500)]] | None = Field(default=None, max_length=10)
+    native_table_labs: list[LabTest] = Field(default_factory=list, max_length=101)
 
     @model_validator(mode="after")
     def validate_layer(self):
+        if self.native_table_labs and self.method != "native":
+            raise ValueError("Native PDF table rows require native text")
         if self.supplemental_ocr_text is not None and self.method != "native":
             raise ValueError("Supplemental OCR requires native PDF text")
         if (self.vision_text is None) != (self.vision_warnings is None) or (self.method == "docx" and self.vision_text is not None):
@@ -191,6 +194,13 @@ async def process_job(job_id: str) -> None:
             elif vision_details or any(p.vision_text is not None for p in parsed.pages):
                 raise ValueError("unexpected_vision_output")
             structured = extract_labeled_fields([p.model_dump() for p in parsed.pages])
+            native_table_labs = [lab for page in parsed.pages for lab in page.native_table_labs]
+            if native_table_labs:
+                available = 100 - len(structured.laboratory_tests)
+                structured.laboratory_tests.extend(native_table_labs[:available])
+                structured.warnings = bounded_warnings(["Native PDF table rows are unverified, may duplicate other transcriptions, and can be misaligned; check each value and range against the original."] + structured.warnings)
+                if len(native_table_labs) > available:
+                    structured.warnings = bounded_warnings(structured.warnings + ["Additional native table rows exceeded the transcription limit and were omitted."])
             if job.vision_requested:
                 structured.warnings = bounded_warnings(["Vision model text is unverified and is not included in this structured transcription; compare it with the original."] + structured.warnings)
             if any(p.method == "docx" for p in parsed.pages):

@@ -1,6 +1,6 @@
 # Optional vision transcription
 
-Vision transcription is disabled by default. To enable the option, configure `VISION_PROVIDER=ollama`, a root `OLLAMA_BASE_URL`, and `OLLAMA_VISION_MODEL` for a separately installed vision-capable Ollama model, then restart the API and worker together. A patient must explicitly choose the option when requesting PDF or image processing; the UI shows the service URL and model. The request is bound to the displayed configuration so changed worker settings fail the job instead of silently sending to a different service.
+Vision transcription is disabled by default. To enable the option, configure `VISION_PROVIDER=ollama`, a root `OLLAMA_BASE_URL`, and `OLLAMA_VISION_MODEL` for a separately installed vision-capable Ollama model, then restart the API and worker together. Image uploads automatically request vision transcription and require this configuration. PDF uploads initially process without vision; a patient can explicitly request vision on a later processing run, and the UI shows the service URL and model. Each job is bound to a configuration fingerprint so changed worker settings fail the job instead of silently sending to a different service.
 
 For local Qwen3-VL 4B, run `ollama pull qwen3-vl:4b`, set `OLLAMA_VISION_MODEL=qwen3-vl:4b`, and use `OLLAMA_BASE_URL=http://host.docker.internal:11434` with Docker Desktop. Keep Ollama running on the host. This vision model is separate from the optional assistant chat and embedding models.
 

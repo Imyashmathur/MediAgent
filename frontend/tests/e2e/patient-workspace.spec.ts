@@ -75,13 +75,16 @@ test('patient can upload, process, isolate, and delete a synthetic report', asyn
   const vision=processing.getByRole('checkbox',{name:/Also send up to the first three page images/});
   await expect(vision).toBeVisible();
   await expect(processing.getByText(/synthetic-vision at http:\/\/synthetic.test/)).toBeVisible();
+  await expect.poll(async()=>{
+    await processing.getByRole('button',{name:'Refresh status'}).click();
+    return await processing.textContent();
+  },{timeout:40_000,intervals:[500,1000]}).toContain('Result: completed');
   await vision.check();
   const request=page.waitForRequest(r=>r.url().endsWith(`/api/documents/${docId}/processing`) && r.method()==='POST');
-  await processing.getByRole('button',{name:'Process document',exact:true}).click();
+  await processing.getByRole('button',{name:'Process again',exact:true}).click();
   expect((await request).postDataJSON()).toEqual({vision_requested:true,vision_config_fingerprint:'a'.repeat(64)});
-  await expect(page.getByRole('alert').filter({hasText:'Vision provider is not configured'})).toBeVisible();
+  await expect(page.getByRole('alert').filter({hasText:/Vision provider (is not configured|configuration changed)/})).toBeVisible();
   await vision.uncheck();
-  await processing.getByRole('button',{name:'Process document',exact:true}).click();
   await expect.poll(async()=>{
     await processing.getByRole('button',{name:'Refresh status'}).click();
     return await processing.textContent();
@@ -179,7 +182,6 @@ test('verified doctor reviews a patient transcription and approves a note', asyn
     await expect(patientRow).toBeVisible();
     await patientRow.getByRole('button',{name:'View processing'}).click();
     const patientProcessing=patient.locator('article').filter({has:patient.getByRole('heading',{name:'Document processing'})});
-    await patientProcessing.getByRole('button',{name:'Process document',exact:true}).click();
     await expect.poll(async()=>{await patientProcessing.getByRole('button',{name:'Refresh status'}).click(); return await patientProcessing.textContent();},{timeout:40_000,intervals:[500,1000]}).toContain('Result: completed');
     await doctor.reload();
     const workspace=doctor.locator('section').filter({has:doctor.getByRole('heading',{name:'Patient workspace'})});
@@ -248,7 +250,6 @@ test('verified doctor reviews a patient transcription and approves a note', asyn
     const denied=await doctor.request.get(`/api/patients/${patientId}/documents`);
     expect(denied.status()).toBe(403);
   } finally {
-    await Promise.all(contexts.map(context=>context.close()));
-    await disableAdmin(adminEmail);
+    try { await Promise.allSettled(contexts.map(context=>context.close())); } finally { await disableAdmin(adminEmail); }
   }
 });

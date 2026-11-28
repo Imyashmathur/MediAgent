@@ -42,7 +42,7 @@ async def main():
                 history = await client.call_tool("list_document_processing_runs", {"document_id": document.json()["id"]})
                 assert not history.is_error
                 processing = await client.call_tool("get_document_processing", {"document_id": document.json()["id"]})
-                assert not processing.is_error and "not_requested" in str(processing.structured_content or processing.content)
+                assert not processing.is_error and any(status in str(processing.structured_content or processing.content) for status in ("queued", "running", "completed", "failed"))
                 profile_result = await client.call_tool("get_patient_profile", {"patient_id": patient_id})
                 assert not profile_result.is_error and "Synthetic history" in str(profile_result.structured_content or profile_result.content)
                 consultations = await client.call_tool("list_patient_consultations", {"patient_id": patient_id})

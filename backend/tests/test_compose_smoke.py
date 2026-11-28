@@ -56,8 +56,8 @@ def test_browser_proxy_registration_login_and_upload():
             uploaded = client.post("/api/documents", files={"file": (name, contents, content_type)})
             assert uploaded.status_code == 201, uploaded.text
             process_path = f"/api/documents/{uploaded.json()['id']}/processing"
-            submitted = client.post(process_path)
-            assert submitted.status_code == 202, submitted.text
+            submitted = client.get(process_path)
+            assert submitted.status_code == 200 and submitted.json()["status"] in ("queued", "running", "completed"), submitted.text
             deadline = time.monotonic() + 45
             while time.monotonic() < deadline:
                 result = client.get(process_path).json()

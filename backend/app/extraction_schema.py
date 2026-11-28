@@ -4,7 +4,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-PARSER_VERSION = "explicit-labels-pipe-tables-v6"
+PARSER_VERSION = "explicit-labels-pipe-native-tables-v7"
 
 
 class Evidence(BaseModel):

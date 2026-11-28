@@ -72,7 +72,6 @@ async def _seed(client: httpx.AsyncClient, admin_email: str, admin_password: str
         checked(await client.post("/consents",headers=patient["auth"],json={"relationship_id":relationship["id"],"scope":scope,"purpose":"Synthetic demonstration","expires_at":expires_at}),201)
     document = checked(await client.post("/documents",headers=patient["auth"],files={"file":("synthetic-report.pdf",synthetic_report(),"application/pdf")}),201)
     path=f"/documents/{document['id']}/processing"
-    checked(await client.post(path,headers=patient["auth"]),202)
     deadline=time.monotonic()+wait_seconds
     while True:
         result=checked(await client.get(path,headers=patient["auth"]),200)
