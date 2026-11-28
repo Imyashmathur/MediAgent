@@ -2,6 +2,8 @@
 
 An in-progress, doctor-supervised healthcare workspace. Use synthetic data only: this build has not undergone clinical, security, privacy, or legal assessment. The API and database-backed background services accept only `APP_ENV=development` (the default); all other values fail startup, including production and misspellings.
 
+MediAgent explores document extraction, retrieval-augmented generation, and consent-scoped tools for healthcare workflows. Contributions are welcome: see [CONTRIBUTING.md](CONTRIBUTING.md), the [roadmap](docs/ROADMAP.md), and the [MIT License](LICENSE).
+
 Authentication rate-limit keys use keyed digests of identities and addresses. API instances sharing Redis must use the same `JWT_SECRET`; changing it resets their active authentication rate-limit windows. The local default is public and provides no protection against guessing key contents.
 
 The API marks HTTP responses `Cache-Control: no-store`, including errors, to reduce the risk of caching patient data. Deployment proxies and clients must also respect that policy.
